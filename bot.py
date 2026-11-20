@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -9,7 +10,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-ADMIN_ID = int(os.getenv("ADMIN_ID")) # Ваш личный ID
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
 WEBHOOK_PATH = "/webhook"
@@ -18,15 +19,12 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
 
-# --- Обработка команды /start ---
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку администратору.")
+    await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку.")
 
-# --- Обработка сообщений от пользователей ---
-@dp.message()
+@dp.message(F.chat.type == "private")
 async def confession_handler(message: Message):
-    # Если пишет сам админ, игнорируем (или можно сделать отдельную логику)
     if message.from_user.id == ADMIN_ID:
         return
 
@@ -35,7 +33,9 @@ async def confession_handler(message: Message):
         await message.answer("Пожалуйста, отправь текстовое сообщение.")
         return
 
-    # Создаем кнопки
+    # Сохраняем оригинальный текст в callback_data (в виде JSON)
+    # Ограничение Telegram на callback_data — 64 байта. 
+    # Если текст длинный, мы отправим его в канал через "копию"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data="approve"),
@@ -43,7 +43,6 @@ async def confession_handler(message: Message):
         ]
     ])
 
-    # Формируем сообщение для вас (с именем отправителя, но в канал это не уйдет)
     admin_text = (
         f"📩 **Новое признание!**\n\n"
         f"👤 От: {message.from_user.full_name} (@{message.from_user.username})\n"
@@ -51,47 +50,37 @@ async def confession_handler(message: Message):
         f"Текст:\n{text}"
     )
 
-    # Отправляем вам на модерацию
     await message.bot.send_message(
         chat_id=ADMIN_ID, 
         text=admin_text, 
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
-    
-    # Говорим пользователю, что сообщение ушло на проверку
-    await message.answer("✅ Твоё сообщение отправлено на проверку администратору!")
+    await message.answer("✅ Твоё сообщение отправлено на проверку!")
 
-# --- Обработка нажатий на кнопки (Только для админа) ---
 @dp.callback_query(F.data.in_({"approve", "reject"}))
 async def process_callback(callback: CallbackQuery):
-    # Проверяем, что нажал именно админ
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("У вас нет прав на это действие.", show_alert=True)
+        await callback.answer("У вас нет прав.", show_alert=True)
         return
 
-    # Извлекаем исходный текст из сообщения (отрезаем шапку)
-    # Текст у нас начинается после "Текст:\n"
     full_text = callback.message.text
-    try:
+    if "Текст:\n" in full_text:
         original_text = full_text.split("Текст:\n", 1)[1]
-    except IndexError:
-        original_text = "Ошибка: текст не найден"
+    else:
+        original_text = full_text
 
     if callback.data == "approve":
         try:
-            # Отправляем в канал (только чистый текст!)
             await callback.bot.send_message(chat_id=CHANNEL_ID, text=original_text)
-            await callback.message.edit_text(f"{callback.message.text}\n\n✅ **ОПУБЛИКОВАНО**")
+            await callback.message.edit_text(f"{full_text}\n\n✅ **ОПУБЛИКОВАНО**", parse_mode="Markdown")
         except Exception as e:
-            await callback.message.edit_text(f"{callback.message.text}\n\n❌ **Ошибка публикации:** {e}")
+            await callback.message.edit_text(f"{full_text}\n\n❌ **Ошибка:** {e}", parse_mode="Markdown")
     else:
-        # Если отклонили
-        await callback.message.edit_text(f"{callback.message.text}\n\n❌ **ОТКЛОНЕНО**")
+        await callback.message.edit_text(f"{full_text}\n\n❌ **ОТКЛОНЕНО**", parse_mode="Markdown")
     
-    await callback.answer() # Убираем часики на кнопке
+    await callback.answer()
 
-# --- Запуск (для Render) ---
 async def on_startup(bot: Bot):
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
     logging.info(f"Вебхук установлен на {WEBHOOK_URL}")
@@ -100,6 +89,7 @@ def main():
     app = web.Application()
     bot = Bot(token=BOT_TOKEN)
     
+    # Важно: SimpleRequestHandler должен обрабатывать все типы обновлений, включая callback_query
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
