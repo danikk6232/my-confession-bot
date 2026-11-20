@@ -20,7 +20,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку.")
+    await message.answer("Привет! Напиши сюда своё признание, я проверю его на соблюдение правил и выложу в канал если все хорошо.")
 
 @dp.message(F.chat.type == "private")
 async def confession_handler(message: Message):
