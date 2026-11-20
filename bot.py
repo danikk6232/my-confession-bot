@@ -20,7 +20,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("Привет! Напиши сюда своё признание, я проверю его на соблюдение правил и выложу в канал если все хорошо.")
+    await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку.")
 
 @dp.message(F.chat.type == "private")
 async def confession_handler(message: Message):
@@ -77,21 +77,22 @@ async def process_callback(callback: CallbackQuery):
     
     await callback.answer()
 
-# --- Заглушка для проверки сервера (чтобы Render не ругался) ---
 async def healthcheck(request):
     return web.Response(text="Bot is running")
 
+# --- ВОТ ЗДЕСЬ ИСПРАВЛЕНИЕ ---
 async def on_startup(bot: Bot):
-    # ВАЖНО: удаляем старый вебхук и ставим новый, чтобы Telegram точно знал, куда стучаться
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(WEBHOOK_URL)
+    await bot.set_webhook(
+        WEBHOOK_URL, 
+        allowed_updates=["message", "callback_query"] # Разрешаем кнопки
+    )
     logging.info(f"Вебхук установлен на {WEBHOOK_URL}")
 
 def main():
     app = web.Application()
     bot = Bot(token=BOT_TOKEN)
     
-    # Регистрируем заглушку
     app.router.add_get('/', healthcheck)
     
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
