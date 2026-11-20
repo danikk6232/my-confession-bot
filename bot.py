@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -33,9 +32,6 @@ async def confession_handler(message: Message):
         await message.answer("Пожалуйста, отправь текстовое сообщение.")
         return
 
-    # Сохраняем оригинальный текст в callback_data (в виде JSON)
-    # Ограничение Telegram на callback_data — 64 байта. 
-    # Если текст длинный, мы отправим его в канал через "копию"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data="approve"),
@@ -81,17 +77,26 @@ async def process_callback(callback: CallbackQuery):
     
     await callback.answer()
 
+# --- Заглушка для проверки сервера (чтобы Render не ругался) ---
+async def healthcheck(request):
+    return web.Response(text="Bot is running")
+
 async def on_startup(bot: Bot):
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    # ВАЖНО: удаляем старый вебхук и ставим новый, чтобы Telegram точно знал, куда стучаться
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Вебхук установлен на {WEBHOOK_URL}")
 
 def main():
     app = web.Application()
     bot = Bot(token=BOT_TOKEN)
     
-    # Важно: SimpleRequestHandler должен обрабатывать все типы обновлений, включая callback_query
+    # Регистрируем заглушку
+    app.router.add_get('/', healthcheck)
+    
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    
     setup_application(app, dp, bot=bot)
     dp.startup.register(on_startup)
     
