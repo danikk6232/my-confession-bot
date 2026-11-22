@@ -3,10 +3,8 @@ import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,15 +20,12 @@ dp = Dispatcher()
 
 processed_messages = set()
 
-class AdminReply(StatesGroup):
-    waiting_for_reply_text = State()
-
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку.")
 
 @dp.message(F.chat.type == "private")
-async def confession_handler(message: Message, state: FSMContext):
+async def confession_handler(message: Message):
     if message.from_user.id in ADMIN_IDS:
         return
 
@@ -56,7 +51,6 @@ async def confession_handler(message: Message, state: FSMContext):
         f"Текст:\n{text}"
     )
 
-    # Безопасная рассылка всем админам
     for admin_id in ADMIN_IDS:
         try:
             await message.bot.send_message(
@@ -72,7 +66,7 @@ async def confession_handler(message: Message, state: FSMContext):
     await message.answer("✅ Твоё сообщение отправлено на проверку!")
 
 @dp.callback_query(F.data.startswith(("approve_", "reject_", "reply_")))
-async def process_callback(callback: CallbackQuery, state: FSMContext):
+async def process_callback(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("У вас нет прав.", show_alert=True)
         return
@@ -102,9 +96,17 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
     elif action == "reject":
         new_text = f"{full_text}\n\n❌ **ОТКЛОНЕНО**"
     elif action == "reply":
-        await state.set_state(AdminReply.waiting_for_reply_text)
-        await state.update_data(target_user_id=target_user_id, original_message_text=original_text)
-        await callback.message.answer("✍️ Введите текст ответа для автора:")
+        # Вместо FSM используем ForceReply
+        # Мы отправляем сообщение с просьбой ответить, и Telegram сам привяжет ответ
+        await callback.message.answer(
+            "✍️ Нажмите на это сообщение, чтобы ответить автору:",
+            reply_markup=ForceReply(selective=True)
+        )
+        # Сохраняем ID автора во временный словарь, привязанный к ID сообщения бота
+        # Это ненадежно при перезапуске, поэтому лучше сохранить в память
+        # Но для простоты используем глобальный словарь
+        global pending_replies
+        pending_replies[callback.message.message_id] = target_user_id
         await callback.answer()
         return
 
@@ -122,34 +124,35 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-@dp.message(AdminReply.waiting_for_reply_text, F.text)
-async def send_reply_to_user(message: Message, state: FSMContext):
+# Глобальный словарь для связи сообщения-ответа и ID автора
+pending_replies = {}
+
+@dp.message(F.reply_to_message)
+async def handle_reply(message: Message):
+    # Проверяем, что это ответ на наше сообщение с ForceReply
+    if message.reply_to_message.message_id not in pending_replies:
+        return
+    
     if message.from_user.id not in ADMIN_IDS:
         return
-    data = await state.get_data()
-    target_user_id = data.get("target_user_id")
-    original_text = data.get("original_message_text")
-
-    if not target_user_id:
-        await message.answer("Ошибка: не удалось найти получателя.")
-        await state.clear()
-        return
-
+    
+    target_user_id = pending_replies[message.reply_to_message.message_id]
+    original_text = "Ваше сообщение" # Можно сохранить текст, но для простоты опустим
+    
     try:
         logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
         reply_text = (
             f"💌 **Ответ на ваше сообщение:**\n\n"
-            f"Ваше сообщение:\n> {original_text}\n\n"
             f"Ответ:\n{message.text}"
         )
         await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
         await message.answer("✅ Ответ успешно отправлен автору!")
         logging.info(f"Ответ успешно отправлен {target_user_id}")
+        # Удаляем из словаря
+        del pending_replies[message.reply_to_message.message_id]
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить ответ: {e}")
         logging.error(f"Ошибка отправки ответа: {e}")
-
-    await state.clear()
 
 async def healthcheck(request):
     return web.Response(text="Bot is running")
