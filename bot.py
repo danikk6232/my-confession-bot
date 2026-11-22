@@ -20,7 +20,8 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
 
-# --- Состояния для ответа ---
+processed_messages = set()
+
 class AdminReply(StatesGroup):
     waiting_for_reply_text = State()
 
@@ -30,11 +31,6 @@ async def start_handler(message: Message):
 
 @dp.message(F.chat.type == "private")
 async def confession_handler(message: Message, state: FSMContext):
-    # Если пишет админ и он в режиме ответа, обрабатываем как ответ
-    current_state = await state.get_state()
-    if current_state == AdminReply.waiting_for_reply_text.state:
-        return  # Пропускаем, чтобы не мешать обработчику ответа
-
     if message.from_user.id in ADMIN_IDS:
         return
 
@@ -43,23 +39,24 @@ async def confession_handler(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, отправь текстовое сообщение.")
         return
 
-    # Кнопки с скрытым ID автора (callback_data имеет лимит 64 байта, ID влезает)
-    author_id = message.from_user.id
+    msg_unique_id = f"{message.from_user.id}_{message.message_id}"
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"approve_{author_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{author_id}"),
-            InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{author_id}")
+            InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"approve_{msg_unique_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{msg_unique_id}"),
+            InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg_unique_id}")
         ]
     ])
 
     admin_text = (
         f"📩 **Новое признание!**\n\n"
         f"👤 От: {message.from_user.full_name} (@{message.from_user.username})\n"
-        f"🆔 ID: `{author_id}`\n\n"
+        f"🆔 ID: `{message.from_user.id}`\n\n"
         f"Текст:\n{text}"
     )
 
+    # Безопасная рассылка всем админам
     for admin_id in ADMIN_IDS:
         try:
             await message.bot.send_message(
@@ -68,27 +65,28 @@ async def confession_handler(message: Message, state: FSMContext):
                 reply_markup=keyboard,
                 parse_mode="Markdown"
             )
+            logging.info(f"Сообщение успешно отправлено админу {admin_id}")
         except Exception as e:
-            logging.error(f"Не удалось отправить админу {admin_id}: {e}")
+            logging.error(f"ОШИБКА: Не удалось отправить админу {admin_id}. Причина: {e}")
 
     await message.answer("✅ Твоё сообщение отправлено на проверку!")
 
-# --- Обработка кнопок ---
 @dp.callback_query(F.data.startswith(("approve_", "reject_", "reply_")))
 async def process_callback(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("У вас нет прав.", show_alert=True)
         return
 
-    # Извлекаем действие и ID автора из callback_data
-    action, author_id_str = callback.data.split("_", 1)
-    author_id = int(author_id_str)
-    full_text = callback.message.text
-
-    if "✅ **ОПУБЛИКОВАНО**" in full_text or "❌ **ОТКЛОНЕНО**" in full_text:
-        await callback.answer("Слишком поздно! Это сообщение уже обработано.", show_alert=True)
+    if callback.data in processed_messages:
+        await callback.answer("Слишком поздно! Это сообщение уже обработал другой админ.", show_alert=True)
         return
+    
+    processed_messages.add(callback.data)
 
+    action, unique_id = callback.data.split("_", 1)
+    target_user_id = int(unique_id.split("_")[0])
+    
+    full_text = callback.message.text
     if "Текст:\n" in full_text:
         original_text = full_text.split("Текст:\n", 1)[1]
     else:
@@ -96,21 +94,16 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
 
     if action == "approve":
         try:
-            # Оборачиваем текст в HTML-тег цитаты
             quoted_text = f"<blockquote>{original_text}</blockquote>"
             await callback.bot.send_message(chat_id=CHANNEL_ID, text=quoted_text, parse_mode="HTML")
-            status = "✅ **ОПУБЛИКОВАНО**"
-            new_text = f"{full_text}\n\n{status}"
+            new_text = f"{full_text}\n\n✅ **ОПУБЛИКОВАНО**"
         except Exception as e:
-            status = f"❌ **Ошибка:** {e}"
-            new_text = f"{full_text}\n\n{status}"
+            new_text = f"{full_text}\n\n❌ **Ошибка:** {e}"
     elif action == "reject":
-        status = "❌ **ОТКЛОНЕНО**"
-        new_text = f"{full_text}\n\n{status}"
+        new_text = f"{full_text}\n\n❌ **ОТКЛОНЕНО**"
     elif action == "reply":
-        # Переводим админа в режим ожидания ответа
         await state.set_state(AdminReply.waiting_for_reply_text)
-        await state.update_data(target_user_id=author_id, original_message_text=original_text)
+        await state.update_data(target_user_id=target_user_id, original_message_text=original_text)
         await callback.message.answer("✍️ Введите текст ответа для автора:")
         await callback.answer()
         return
@@ -118,7 +111,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(new_text, parse_mode="Markdown")
     await callback.answer()
 
-    # Уведомляем остальных админов
     for admin_id in ADMIN_IDS:
         if admin_id != callback.from_user.id:
             try:
@@ -130,7 +122,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-# --- Обработчик ответа админа ---
 @dp.message(AdminReply.waiting_for_reply_text, F.text)
 async def send_reply_to_user(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -145,7 +136,7 @@ async def send_reply_to_user(message: Message, state: FSMContext):
         return
 
     try:
-        # Отправляем ответ пользователю
+        logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
         reply_text = (
             f"💌 **Ответ на ваше сообщение:**\n\n"
             f"Ваше сообщение:\n> {original_text}\n\n"
@@ -153,8 +144,10 @@ async def send_reply_to_user(message: Message, state: FSMContext):
         )
         await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
         await message.answer("✅ Ответ успешно отправлен автору!")
+        logging.info(f"Ответ успешно отправлен {target_user_id}")
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить ответ: {e}")
+        logging.error(f"Ошибка отправки ответа: {e}")
 
     await state.clear()
 
