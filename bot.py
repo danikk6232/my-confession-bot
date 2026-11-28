@@ -24,7 +24,39 @@ pending_replies = {}
 async def start_handler(message: Message):
     await message.answer("Привет! Напиши сюда своё признание, и я отправлю его на проверку.")
 
-@dp.message(F.chat.type == "private")
+@dp.message(F.reply_to_message)
+async def handle_reply(message: Message):
+    logging.info(f"handle_reply: from={message.from_user.id}, reply_to={message.reply_to_message.message_id}, pending_keys={list(pending_replies.keys())}")
+
+    if message.from_user.id not in ADMIN_IDS:
+        logging.info("handle_reply: не админ, выходим")
+        return
+    if not message.text:
+        logging.info("handle_reply: не текст, выходим")
+        await message.answer("Пожалуйста, отправь текстовый ответ.")
+        return
+
+    reply_to_id = message.reply_to_message.message_id
+    if reply_to_id not in pending_replies:
+        logging.info(f"handle_reply: ключ {reply_to_id} не найден в pending_replies")
+        return
+
+    target_user_id = pending_replies.pop(reply_to_id)
+
+    try:
+        logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
+        reply_text = (
+            f"💌 **Ответ на ваше сообщение:**\n\n"
+            f"Ответ:\n{message.text}"
+        )
+        await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
+        await message.answer("✅ Ответ успешно отправлен автору!")
+        logging.info(f"Ответ успешно отправлен {target_user_id}")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить ответ: {e}")
+        logging.error(f"Ошибка отправки ответа: {e}")
+
+@dp.message(F.chat.type == "private", ~F.reply_to_message)
 async def confession_handler(message: Message):
     if message.from_user.id in ADMIN_IDS:
         return
@@ -101,6 +133,7 @@ async def process_callback(callback: CallbackQuery):
             reply_markup=ForceReply()
         )
         pending_replies[sent.message_id] = target_user_id
+        logging.info(f"REPLY BUTTON: target={target_user_id}, sent_msg_id={sent.message_id}, pending={list(pending_replies.keys())}")
         await callback.answer()
         return
 
@@ -118,32 +151,9 @@ async def process_callback(callback: CallbackQuery):
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-@dp.message(F.reply_to_message)
-async def handle_reply(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    if not message.text:
-        await message.answer("Пожалуйста, отправь текстовый ответ.")
-        return
-
-    reply_to_id = message.reply_to_message.message_id
-    if reply_to_id not in pending_replies:
-        return
-
-    target_user_id = pending_replies.pop(reply_to_id)
-
-    try:
-        logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
-        reply_text = (
-            f"💌 **Ответ на ваше сообщение:**\n\n"
-            f"Ответ:\n{message.text}"
-        )
-        await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
-        await message.answer("✅ Ответ успешно отправлен автору!")
-        logging.info(f"Ответ успешно отправлен {target_user_id}")
-    except Exception as e:
-        await message.answer(f"❌ Не удалось отправить ответ: {e}")
-        logging.error(f"Ошибка отправки ответа: {e}")
+@dp.message()
+async def debug_all(message: Message):
+    logging.info(f"ANY MESSAGE: text={message.text!r}, from={message.from_user.id}, chat_type={message.chat.type}, reply_to={message.reply_to_message.message_id if message.reply_to_message else None}")
 
 async def healthcheck(request):
     return web.Response(text="Bot is running")
