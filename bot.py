@@ -6,7 +6,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
@@ -96,15 +95,12 @@ async def process_callback(callback: CallbackQuery):
     elif action == "reject":
         new_text = f"{full_text}\n\n❌ **ОТКЛОНЕНО**"
     elif action == "reply":
-        # Вместо FSM используем ForceReply
-        # Мы отправляем сообщение с просьбой ответить, и Telegram сам привяжет ответ
+   
         await callback.message.answer(
             "✍️ Нажмите на это сообщение, чтобы ответить автору:",
             reply_markup=ForceReply(selective=True)
         )
-        # Сохраняем ID автора во временный словарь, привязанный к ID сообщения бота
-        # Это ненадежно при перезапуске, поэтому лучше сохранить в память
-        # Но для простоты используем глобальный словарь
+  
         global pending_replies
         pending_replies[callback.message.message_id] = target_user_id
         await callback.answer()
@@ -124,12 +120,11 @@ async def process_callback(callback: CallbackQuery):
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-# Глобальный словарь для связи сообщения-ответа и ID автора
 pending_replies = {}
 
 @dp.message(F.reply_to_message)
 async def handle_reply(message: Message):
-    # Проверяем, что это ответ на наше сообщение с ForceReply
+  
     if message.reply_to_message.message_id not in pending_replies:
         return
     
@@ -137,7 +132,7 @@ async def handle_reply(message: Message):
         return
     
     target_user_id = pending_replies[message.reply_to_message.message_id]
-    original_text = "Ваше сообщение" # Можно сохранить текст, но для простоты опустим
+    original_text = "Ваше сообщение"
     
     try:
         logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
@@ -148,7 +143,6 @@ async def handle_reply(message: Message):
         await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
         await message.answer("✅ Ответ успешно отправлен автору!")
         logging.info(f"Ответ успешно отправлен {target_user_id}")
-        # Удаляем из словаря
         del pending_replies[message.reply_to_message.message_id]
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить ответ: {e}")
