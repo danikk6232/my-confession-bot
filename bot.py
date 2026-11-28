@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
 
 processed_messages = set()
+pending_replies = {}
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
@@ -34,7 +35,7 @@ async def confession_handler(message: Message):
         return
 
     msg_unique_id = f"{message.from_user.id}_{message.message_id}"
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"approve_{msg_unique_id}"),
@@ -73,12 +74,12 @@ async def process_callback(callback: CallbackQuery):
     if callback.data in processed_messages:
         await callback.answer("Слишком поздно! Это сообщение уже обработал другой админ.", show_alert=True)
         return
-    
+
     processed_messages.add(callback.data)
 
     action, unique_id = callback.data.split("_", 1)
     target_user_id = int(unique_id.split("_")[0])
-    
+
     full_text = callback.message.text
     if "Текст:\n" in full_text:
         original_text = full_text.split("Текст:\n", 1)[1]
@@ -95,14 +96,11 @@ async def process_callback(callback: CallbackQuery):
     elif action == "reject":
         new_text = f"{full_text}\n\n❌ **ОТКЛОНЕНО**"
     elif action == "reply":
-   
-        await callback.message.answer(
+        sent = await callback.message.answer(
             "✍️ Нажмите на это сообщение, чтобы ответить автору:",
-            reply_markup=ForceReply(selective=True)
+            reply_markup=ForceReply()
         )
-  
-        global pending_replies
-        pending_replies[callback.message.message_id] = target_user_id
+        pending_replies[sent.message_id] = target_user_id
         await callback.answer()
         return
 
@@ -120,20 +118,20 @@ async def process_callback(callback: CallbackQuery):
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-pending_replies = {}
-
 @dp.message(F.reply_to_message)
 async def handle_reply(message: Message):
-  
-    if message.reply_to_message.message_id not in pending_replies:
-        return
-    
     if message.from_user.id not in ADMIN_IDS:
         return
-    
-    target_user_id = pending_replies[message.reply_to_message.message_id]
-    original_text = "Ваше сообщение"
-    
+    if not message.text:
+        await message.answer("Пожалуйста, отправь текстовый ответ.")
+        return
+
+    reply_to_id = message.reply_to_message.message_id
+    if reply_to_id not in pending_replies:
+        return
+
+    target_user_id = pending_replies.pop(reply_to_id)
+
     try:
         logging.info(f"Попытка отправить ответ пользователю {target_user_id}")
         reply_text = (
@@ -143,7 +141,6 @@ async def handle_reply(message: Message):
         await message.bot.send_message(chat_id=target_user_id, text=reply_text, parse_mode="Markdown")
         await message.answer("✅ Ответ успешно отправлен автору!")
         logging.info(f"Ответ успешно отправлен {target_user_id}")
-        del pending_replies[message.reply_to_message.message_id]
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить ответ: {e}")
         logging.error(f"Ошибка отправки ответа: {e}")
